@@ -1,0 +1,1 @@
+cargo run --release -p cache-map --bin stress_test 2>&1

@@ -56,8 +56,8 @@ where
 {
     pub fn new() -> Self {
         let shard_count = std::thread::available_parallelism()
-            .map(|p| p.get() * 4)
-            .unwrap_or(16); // default to 16 shards if we can't detect
+            .map(|p| (p.get() * 4).next_power_of_two())
+            .unwrap_or(16);
 
         CacheConfiguration {
             default_ttl: None,
@@ -90,10 +90,10 @@ where
     }
 
     /// Set the number of shards for the underlying concurrent map.
-    /// Defaults to `num_cpus * 4` if not set.
-    /// A good starting point for high-core-count machines is `num_cpus * 8`.
+    /// The value will be rounded up to the next power of two (required by DashMap).
+    /// Defaults to `num_cpus * 4` (rounded up) if not set.
     pub fn set_shard_count(mut self, count: usize) -> Self {
-        self.shard_count = count;
+        self.shard_count = count.next_power_of_two();
         self
     }
 
