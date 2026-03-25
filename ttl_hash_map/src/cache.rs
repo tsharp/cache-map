@@ -43,7 +43,7 @@ where
     /// Number of shards for the underlying concurrent map.
     /// Higher values reduce contention at the cost of slightly more memory.
     /// Defaults to `num_cpus * 4` if not set.
-    shard_count: Option<usize>,
+    shard_count: usize,
 
     /// Optional callback invoked when an entry is evicted (expired or removed).
     on_evict: Option<EvictionListener<K, V>>,
@@ -55,12 +55,16 @@ where
     V: Clone + Send + Sync + 'static,
 {
     pub fn new() -> Self {
+        let shard_count = std::thread::available_parallelism()
+            .map(|p| p.get() * 4)
+            .unwrap_or(16); // default to 16 shards if we can't detect
+
         CacheConfiguration {
             default_ttl: None,
             max_capacity: None,
             initial_capacity: None,
             cleanup_interval: None,
-            shard_count: None,
+            shard_count,
             on_evict: None,
         }
     }
@@ -89,7 +93,7 @@ where
     /// Defaults to `num_cpus * 4` if not set.
     /// A good starting point for high-core-count machines is `num_cpus * 8`.
     pub fn set_shard_count(mut self, count: usize) -> Self {
-        self.shard_count = Some(count);
+        self.shard_count = count;
         self
     }
 
@@ -116,7 +120,7 @@ where
         self.cleanup_interval
     }
 
-    pub fn get_shard_count(&self) -> Option<usize> {
+    pub fn get_shard_count(&self) -> usize {
         self.shard_count
     }
 

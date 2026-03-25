@@ -47,10 +47,7 @@ where
 {
     pub fn from_config(config: CacheConfiguration<K, V>) -> Self {
         let capacity = config.get_initial_capacity().unwrap_or(1024);
-        let inner = match config.get_shard_count() {
-            Some(shards) => DashMap::with_capacity_and_shard_amount(capacity, shards),
-            None => DashMap::with_capacity(capacity),
-        };
+        let inner = DashMap::with_capacity_and_shard_amount(capacity, config.get_shard_count());
 
         let has_evict = config.get_on_evict().is_some();
         let use_retain = !has_evict && std::thread::available_parallelism()
