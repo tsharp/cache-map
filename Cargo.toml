@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "ttl_hash_map"
+]
+resolver = "2"
+
+[workspace.dependencies]
+dashmap = { version = "6.1.0", default-features = false, features = ["inline", "raw-api", "rayon"] }
+quick_cache = "0.6"
+tokio-util = "0.7.9"
+parking_lot = "0.12.5"
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,21 @@
+[package]
+name = "ttl_hash_map"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dashmap.workspace = true
+rayon = "1"
+rand = { version = "0.8", features = ["small_rng"] }
+
+[[bin]]
+name = "stress_test"
+path = "src/bin/stress_test.rs"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = { version = "0.8", features = ["small_rng"] }
+
+[[bench]]
+name = "contention"
+harness = false
