@@ -49,7 +49,7 @@ fn run_scenario(reader_threads: usize) {
 
     let start = Instant::now();
 
-    // --- Writer threads: continuous inserts simulating connection churn ---
+    // --- Writer threads: continuous inserts simulating entry churn ---
     let writers: Vec<_> = (0..WRITER_THREADS)
         .map(|t| {
             let cache = Arc::clone(&cache);
