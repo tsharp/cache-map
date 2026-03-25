@@ -1,12 +1,18 @@
 [workspace]
 members = [
-    "ttl_hash_map"
+    "cache-map",
+    "tiered_cache",
 ]
 resolver = "2"
 
 [workspace.dependencies]
+cache-map = { path = "cache-map" }
 dashmap = { version = "6.1.0", default-features = false, features = ["inline", "raw-api", "rayon"] }
-quick_cache = "0.6"
+papaya = "0.2.3"
+quick_cache = "0.6.21"
 tokio-util = "0.7.9"
 parking_lot = "0.12.5"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.50.0", features = ["full"] }
+rayon = "1.11.0"
+rand = { version = "0.10.0" }
+criterion = { version = "0.8.2", features = ["html_reports"] }

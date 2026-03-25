@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
-use ttl_hash_map::cache::{CacheConfiguration, CacheMap};
-use ttl_hash_map::dash_cache::DashCache;
+use rand::{RngExt, SeedableRng};
+use cache_map::cache::{CacheConfiguration, CacheMap};
+use cache_map::dash_cache::DashCache;
 
 const READS_PER_THREAD: u64 = 100_000;
 
@@ -52,7 +52,7 @@ fn contention_benchmark(c: &mut Criterion) {
                                     let mut rng = SmallRng::seed_from_u64(t as u64);
                                     barrier.wait(); // all threads start together
                                     for _ in 0..READS_PER_THREAD {
-                                        let key = rng.gen_range(0..element_count);
+                                        let key = rng.random_range(0..element_count);
                                         let _ = cache.get(&key);
                                     }
                                 })

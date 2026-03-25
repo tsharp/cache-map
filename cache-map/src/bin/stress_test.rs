@@ -1,26 +1,49 @@
+use core::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
-use ttl_hash_map::cache::{CacheConfiguration, CacheMap};
-use ttl_hash_map::dash_cache::DashCache;
+use rand::{RngExt, SeedableRng};
+use cache_map::{CacheConfiguration, CacheMap};
+use cache_map::DashCache;
+use cache_map::PapayaCache;
 
-const TEST_DURATION: Duration = Duration::from_secs(60);
+const TEST_DURATION: Duration = Duration::from_secs(15);
 const MAX_ELEMENTS: u64 = 250_000;
 const WRITER_THREADS: usize = 4;
-const READER_THREAD_CONFIGS: &[usize] = &[32, 64, 128];
+const READER_THREAD_CONFIGS: &[usize] = &[1, 4, 8];
 const STATS_INTERVAL: Duration = Duration::from_secs(5);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(2);
 // Target TTL range: 5-20s. With 250K elements and avg TTL ~12.5s, steady-state
 // replacement rate is ~20K inserts/s spread across WRITER_THREADS.
 const TTL_SHORT_MS: (u64, u64) = (3_000, 8_000);
 const TTL_LONG_MS: (u64, u64) = (10_000, 25_000);
+// Throttle writers to a target aggregate write rate so both cache
+// implementations see comparable write pressure.  Each writer sleeps briefly
+// every WRITE_BATCH_SIZE inserts to stay near the target.
+const TARGET_WRITES_PER_SEC: u64 = 500_000;
+const WRITE_BATCH_SIZE: u64 = 500;
 
-fn run_scenario(reader_threads: usize) {
+#[derive(Debug)]
+enum CacheType {
+    DashCache,
+    PapayaCache,
+}
+
+impl fmt::Display for CacheType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CacheType::DashCache => write!(f, "DashCache"),
+            CacheType::PapayaCache => write!(f, "PapayaCache"),
+        }
+    }
+}
+
+fn run_scenario(cache_type: CacheType, reader_threads: usize) {
     println!("\n{}", "=".repeat(60));
+    println!("  Cache Type: {}", cache_type);
     println!("  Stress test: {reader_threads} readers + {WRITER_THREADS} writers, {TEST_DURATION:?}");
     println!("  Target cache size: {MAX_ELEMENTS} elements");
     println!("{}\n", "=".repeat(60));
@@ -28,7 +51,11 @@ fn run_scenario(reader_threads: usize) {
     let config = CacheConfiguration::new()
         .set_default_ttl(Duration::from_secs(15))
         .set_max_capacity(MAX_ELEMENTS as usize);
-    let cache: Arc<DashCache<u64, u64>> = Arc::new(DashCache::from_config(config));
+
+    let cache: Arc<dyn CacheMap<u64, u64> + Send + Sync> = match cache_type {
+        CacheType::DashCache => Arc::new(DashCache::from_config(config)),
+        CacheType::PapayaCache => Arc::new(PapayaCache::from_config(config)),
+    };
 
     let running = Arc::new(AtomicBool::new(true));
     let total_reads = Arc::new(AtomicU64::new(0));
@@ -41,7 +68,7 @@ fn run_scenario(reader_threads: usize) {
     {
         let mut rng = SmallRng::seed_from_u64(0xBEEF);
         for i in 0..MAX_ELEMENTS {
-            let ttl_ms = rng.gen_range(5_000..20_000u64);
+            let ttl_ms = rng.random_range(5_000..20_000u64);
             let _ = cache.insert_with_ttl(i, i, Duration::from_millis(ttl_ms));
         }
         key_ceiling.store(MAX_ELEMENTS, Ordering::Release);
@@ -62,28 +89,35 @@ fn run_scenario(reader_threads: usize) {
                 .spawn(move || {
                     let mut rng = SmallRng::seed_from_u64(0xCAFE + t as u64);
                     let mut local_writes = 0u64;
+                    let per_thread_rate = TARGET_WRITES_PER_SEC / WRITER_THREADS as u64;
+                    let batch_duration = Duration::from_secs_f64(
+                        WRITE_BATCH_SIZE as f64 / per_thread_rate as f64
+                    );
+                    let mut batch_start = Instant::now();
 
                     while running.load(Ordering::Relaxed) {
                         let key = key_ceiling.fetch_add(1, Ordering::AcqRel);
-                        let ttl_ms = if rng.gen_bool(0.4) {
-                            rng.gen_range(TTL_SHORT_MS.0..TTL_SHORT_MS.1)
+                        let ttl_ms = if rng.random_bool(0.4) {
+                            rng.random_range(TTL_SHORT_MS.0..TTL_SHORT_MS.1)
                         } else {
-                            rng.gen_range(TTL_LONG_MS.0..TTL_LONG_MS.1)
+                            rng.random_range(TTL_LONG_MS.0..TTL_LONG_MS.1)
                         };
                         let _ = cache.insert_with_ttl(key, key, Duration::from_millis(ttl_ms));
                         local_writes += 1;
 
-                        if local_writes % 1_000 == 0 {
-                            total_writes.fetch_add(1_000, Ordering::Relaxed);
+                        if local_writes % WRITE_BATCH_SIZE == 0 {
+                            total_writes.fetch_add(WRITE_BATCH_SIZE, Ordering::Relaxed);
 
-                            // Throttle if cache is well above target
-                            if cache.len() > MAX_ELEMENTS as usize * 2 {
-                                thread::sleep(Duration::from_millis(1));
+                            // Sleep to stay near the target write rate.
+                            let elapsed = batch_start.elapsed();
+                            if elapsed < batch_duration {
+                                thread::sleep(batch_duration - elapsed);
                             }
+                            batch_start = Instant::now();
                         }
                     }
 
-                    let remainder = local_writes % 1_000;
+                    let remainder = local_writes % WRITE_BATCH_SIZE;
                     total_writes.fetch_add(remainder, Ordering::Relaxed);
                 })
                 .expect("failed to spawn writer")
@@ -139,7 +173,7 @@ fn run_scenario(reader_threads: usize) {
                         if ceiling == 0 {
                             continue;
                         }
-                        let key = rng.gen_range(0..ceiling);
+                        let key = rng.random_range(0..ceiling);
                         if cache.get(&key).is_some() {
                             local_hits += 1;
                         }
@@ -237,11 +271,12 @@ fn run_scenario(reader_threads: usize) {
 }
 
 fn main() {
-    println!("DashCache Stress Test (Mixed Read/Write)");
+    println!("CacheMap Stress Test (Mixed Read/Write)");
     println!("========================================");
 
     for &threads in READER_THREAD_CONFIGS {
-        run_scenario(threads);
+        run_scenario(CacheType::PapayaCache, threads);
+        run_scenario(CacheType::DashCache, threads);
     }
 
     println!("\nAll scenarios complete.");

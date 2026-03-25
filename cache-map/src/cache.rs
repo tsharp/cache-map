@@ -153,6 +153,9 @@ where
     /// Check if a key exists and is not expired.
     fn contains_key(&self, key: &K) -> bool;
 
+    /// Perform a cleanup pass to remove expired entries. This is typically called automatically at intervals.
+    fn cleanup(&self);
+
     /// Returns the total number of entries.
     fn len(&self) -> usize;
 
