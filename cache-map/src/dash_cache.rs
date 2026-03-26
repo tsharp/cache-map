@@ -1,30 +1,19 @@
 use std::hash::Hash;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::cache::{CacheConfiguration, CacheError, CacheMap, EvictionListener, Result};
+use crate::clock::CoarseClock;
 
 /// A value wrapper that tracks when the entry expires.
 struct CacheEntry<V> {
     value: V,
-    expires_at: Instant
-}
-
-impl<V> CacheEntry<V> {
-    fn new(value: V, ttl: Duration) -> Self {
-        Self {
-            value: value,
-            expires_at: Instant::now() + ttl
-        }
-    }
-
-    #[inline]
-    #[must_use]
-    fn is_expired(&self) -> bool {
-        Instant::now() >= self.expires_at
-    }
+    expires_at_ms: u64,
 }
 
 /// A concurrent hash map with per-entry TTL expiration, backed by `DashMap`.
@@ -37,7 +26,9 @@ where
     default_ttl: Duration,
     max_capacity: usize,
     use_retain_cleanup: bool,
-    on_evict: Option<EvictionListener<K, V>>,    
+    on_evict: Option<EvictionListener<K, V>>,
+    clock: Arc<CoarseClock>,
+    ticker_stop: Arc<AtomicBool>,
 }
 
 impl<K, V> DashCache<K, V>
@@ -54,12 +45,30 @@ where
             .map(|p| p.get() <= 8)
             .unwrap_or(true);
 
+        let clock = Arc::new(CoarseClock::new());
+        clock.tick();
+
+        let ticker_stop = Arc::new(AtomicBool::new(false));
+        let ticker_clock = Arc::clone(&clock);
+        let ticker_flag = Arc::clone(&ticker_stop);
+        thread::Builder::new()
+            .name("cache-tick".into())
+            .spawn(move || {
+                while !ticker_flag.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(1));
+                    ticker_clock.tick();
+                }
+            })
+            .expect("failed to spawn ticker thread");
+
         Self {
             inner,
             default_ttl: config.get_default_ttl().unwrap_or(Duration::from_secs(300)),
             max_capacity: config.get_max_capacity().unwrap_or(0),
             use_retain_cleanup: use_retain,
             on_evict: config.get_on_evict().cloned(),
+            clock,
+            ticker_stop,
         }
     }
 
@@ -74,7 +83,7 @@ where
     /// Evict the entry if it is expired, returning `true` if it was removed.
     fn evict_if_expired(&self, key: &K) -> bool {
         if let Some(entry) = self.inner.get(key) {
-            if entry.is_expired() {
+            if self.clock.is_expired(entry.expires_at_ms) {
                 drop(entry); // release read lock before removing
                 if let Some((k, entry)) = self.inner.remove(key) {
                     self.notify_evict(k, entry.value);
@@ -97,17 +106,17 @@ where
 
     fn insert_with_ttl(&self, key: K, value: V, ttl: Duration) -> Result {
         if self.max_capacity > 0 && self.inner.len() >= self.max_capacity {
-            // return an error
             return Err(CacheError::MaxCapacityReached);
         }
 
-        self.inner.insert(key, CacheEntry::new(value, ttl));
+        let expires_at_ms = self.clock.expire_at_ms(ttl);
+        self.inner.insert(key, CacheEntry { value, expires_at_ms });
         Ok(())
     }
 
     fn get(&self, key: &K) -> Option<V> {
         let entry = self.inner.get(key)?;
-        if entry.is_expired() {
+        if self.clock.is_expired(entry.expires_at_ms) {
             drop(entry);
             if let Some((k, entry)) = self.inner.remove(key) {
                 self.notify_evict(k, entry.value);
@@ -126,29 +135,28 @@ where
 
     fn refresh(&self, key: &K) -> bool {
         if let Some(mut entry) = self.inner.get_mut(key) {
-            if entry.is_expired() {
+            if self.clock.is_expired(entry.expires_at_ms) {
                 drop(entry);
                 self.inner.remove(key);
                 return false;
             }
-            entry.expires_at = Instant::now() + self.default_ttl;
+            entry.expires_at_ms = self.clock.expire_at_ms(self.default_ttl);
             true
         } else {
             false
         }
     }
 
-    /// Remove all expired entries in parallel.
     fn cleanup(&self) {
         if self.use_retain_cleanup {
-            self.inner.retain(|_, entry| !entry.is_expired());
+            self.inner.retain(|_, entry| !self.clock.is_expired(entry.expires_at_ms));
             return;
         }
 
         let expired_keys: Vec<K> = self
             .inner
             .par_iter()
-            .filter(|entry| entry.value().is_expired())
+            .filter(|entry| self.clock.is_expired(entry.value().expires_at_ms))
             .map(|entry| entry.key().clone())
             .collect();
 
@@ -174,6 +182,16 @@ where
     
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<K, V> Drop for DashCache<K, V>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.ticker_stop.store(true, Ordering::Release);
     }
 }
 

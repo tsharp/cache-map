@@ -1,32 +1,16 @@
 use std::hash::Hash;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use crate::cache::{CacheConfiguration, CacheError, CacheMap, EvictionListener, Result};
+use crate::clock::CoarseClock;
 
 /// A value wrapper that tracks when the entry expires.
 struct CacheEntry<V> {
     value: V,
-    expires_at: Instant
-}
-
-impl<V> CacheEntry<V> {
-    fn new(value: V, ttl: Duration) -> Self {
-        Self {
-            value: value,
-            expires_at: Instant::now() + ttl
-        }
-    }
-
-    #[inline]
-    #[must_use]
-    fn is_expired(&self) -> bool {
-        Instant::now() >= self.expires_at
-    }
-
-    #[inline]
-    fn refresh(&mut self, ttl: Duration) {
-        self.expires_at = Instant::now() + ttl;
-    }
+    expires_at_ms: u64,
 }
 
 /// A concurrent hash map with per-entry TTL expiration, backed by `papaya`.
@@ -42,7 +26,9 @@ where
     inner: papaya::HashMap<K, CacheEntry<V>>,
     default_ttl: Duration,
     max_capacity: usize,
-    on_evict: Option<EvictionListener<K, V>>,    
+    on_evict: Option<EvictionListener<K, V>>,
+    clock: Arc<CoarseClock>,
+    ticker_stop: Arc<AtomicBool>,
 }
 
 impl<K, V> PapayaCache<K, V>
@@ -60,11 +46,29 @@ where
             .resize_mode(papaya::ResizeMode::Blocking)
             .build();
 
+        let clock = Arc::new(CoarseClock::new());
+        clock.tick();
+
+        let ticker_stop = Arc::new(AtomicBool::new(false));
+        let ticker_clock = Arc::clone(&clock);
+        let ticker_flag = Arc::clone(&ticker_stop);
+        thread::Builder::new()
+            .name("cache-tick".into())
+            .spawn(move || {
+                while !ticker_flag.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(1));
+                    ticker_clock.tick();
+                }
+            })
+            .expect("failed to spawn ticker thread");
+
         Self {
             inner,
             default_ttl: config.get_default_ttl().unwrap_or(Duration::from_secs(300)),
             max_capacity: config.get_max_capacity().unwrap_or(0),
             on_evict: config.get_on_evict().cloned(),
+            clock,
+            ticker_stop,
         }
     }
 
@@ -80,7 +84,7 @@ where
     fn evict_if_expired(&self, key: &K) -> bool {
         let pin = self.inner.pin();
         if let Some(entry) = pin.get(key) {
-            if entry.is_expired() {
+            if self.clock.is_expired(entry.expires_at_ms) {
                 if let Some((_k, entry)) = pin.remove_entry(key) {
                     self.notify_evict(key.clone(), entry.value.clone());
                 }
@@ -105,15 +109,16 @@ where
             return Err(CacheError::MaxCapacityReached);
         }
 
+        let expires_at_ms = self.clock.expire_at_ms(ttl);
         let pin = self.inner.pin();
-        pin.insert(key, CacheEntry::new(value, ttl));
+        pin.insert(key, CacheEntry { value, expires_at_ms });
         Ok(())
     }
 
     fn get(&self, key: &K) -> Option<V> {
         let pin = self.inner.pin();
         let entry = pin.get(key)?;
-        if entry.is_expired() {
+        if self.clock.is_expired(entry.expires_at_ms) {
             if let Some((_k, removed)) = pin.remove_entry(key) {
                 self.notify_evict(key.clone(), removed.value.clone());
             }
@@ -134,25 +139,24 @@ where
     fn refresh(&self, key: &K) -> bool {
         let pin = self.inner.pin();
         if let Some(entry) = pin.get(key) {
-            if entry.is_expired() {
+            if self.clock.is_expired(entry.expires_at_ms) {
                 pin.remove(key);
                 return false;
             }
-            let new_entry = CacheEntry::new(entry.value.clone(), self.default_ttl);
-            pin.insert(key.clone(), new_entry);
+            let expires_at_ms = self.clock.expire_at_ms(self.default_ttl);
+            pin.insert(key.clone(), CacheEntry { value: entry.value.clone(), expires_at_ms });
             true
         } else {
             false
         }
     }
 
-    /// Remove all expired entries.
     fn cleanup(&self) {
         let pin = self.inner.pin();
 
         let expired_keys: Vec<K> = pin
             .iter()
-            .filter(|(_k, entry)| entry.is_expired())
+            .filter(|(_k, entry)| self.clock.is_expired(entry.expires_at_ms))
             .map(|(k, _)| k.clone())
             .collect();
 
@@ -178,6 +182,16 @@ where
     
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<K, V> Drop for PapayaCache<K, V>
+where
+    K: Eq + Hash + Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        self.ticker_stop.store(true, Ordering::Release);
     }
 }
 

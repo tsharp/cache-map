@@ -20,3 +20,7 @@ rand.workspace = true
 [[bench]]
 name = "contention"
 harness = false
+
+[[bench]]
+name = "read_overhead"
+harness = false
