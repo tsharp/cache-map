@@ -267,6 +267,12 @@ With many reader threads, most expired entries are caught by `get()` before the 
 
 Throughput increases as hit rate drops. Returning `None` for a miss skips the value clone and reduces the amount of work on the read path.
 
+### 7. Allocator Choice Was Not a Primary Lever For This Workload
+
+The EPYC rerun with the stress test linked against `mimalloc` did not show a clear material improvement over the earlier numbers for this benchmark shape. The workload here uses small `u64 -> u64` entries, so allocator overhead is a relatively small fraction of total cost compared with synchronization, cache-line movement, and core saturation.
+
+That does not mean allocator choice never matters. `mimalloc` and `jemalloc` are still reasonable options to test, but they are more likely to help when cache entries are larger, values require heap allocation, or eviction and cloning involve more allocator traffic than this benchmark does.
+
 ---
 
 ## Production Recommendations
@@ -294,7 +300,9 @@ PapayaCache sustains 444–470K inserts/s under all tested configurations. For w
 
 ### Allocator
 
-Consider `mimalloc` or `jemalloc` with per-thread caching. Global allocator contention can impose a measurable overhead, and allocator choice is a relatively low-effort variable to test.
+For the current benchmark workload, switching the stress test to `mimalloc` did not produce a clear material gain. That result is consistent with the benchmark using very small entries, where allocator cost is not the dominant bottleneck.
+
+`mimalloc` and `jemalloc` are still worth evaluating for more allocation-heavy scenarios, especially if cached values are larger, contain owned buffers or strings, or trigger significantly more heap churn during insert, clone, and eviction. In those cases, allocator behavior can matter more than it does for a `u64 -> u64` stress test.
 
 ### Scaling Strategy
 
@@ -328,6 +336,7 @@ All tests pass: `cargo test -p cache-map`
 |-------|---------|---------|
 | `dashmap` | 6.1.0 | Concurrent hash map (features: `inline`, `raw-api`, `rayon`) |
 | `papaya` | 0.2.3 | Lock-free concurrent hash map |
+| `mimalloc` | 0.1 | Alternative allocator used by the stress test binary |
 | `rayon` | 1.x | Parallel iteration for DashCache cleanup |
 | `rand` | 0.10 | Random key generation in stress tests |
 | `criterion` | 0.8 | Microbenchmarks (dev-dependency) |
