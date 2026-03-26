@@ -10,7 +10,7 @@ use cache_map::{CacheConfiguration, CacheMap};
 use cache_map::DashCache;
 use cache_map::PapayaCache;
 
-const TEST_DURATION: Duration = Duration::from_secs(15);
+const TEST_DURATION: Duration = Duration::from_secs(30);
 const MAX_ELEMENTS: u64 = 250_000;
 const WRITER_THREADS: usize = 4;
 const READER_THREAD_CONFIGS: &[usize] = &[1, 4, 8];
