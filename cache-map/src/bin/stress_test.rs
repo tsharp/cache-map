@@ -41,10 +41,10 @@ impl fmt::Display for CacheType {
     }
 }
 
-fn run_scenario(cache_type: CacheType, reader_threads: usize) {
+fn run_scenario(cache_type: CacheType, reader_threads: usize, test_duration: Duration) {
     println!("\n{}", "=".repeat(60));
     println!("  Cache Type: {}", cache_type);
-    println!("  Stress test: {reader_threads} readers + {WRITER_THREADS} writers, {TEST_DURATION:?}");
+    println!("  Stress test: {reader_threads} readers + {WRITER_THREADS} writers, {test_duration:?}");
     println!("  Target cache size: {MAX_ELEMENTS} elements");
     println!("{}\n", "=".repeat(60));
 
@@ -199,7 +199,7 @@ fn run_scenario(cache_type: CacheType, reader_threads: usize) {
     let mut last_writes = 0u64;
     let mut last_time = Instant::now();
 
-    while start.elapsed() < TEST_DURATION {
+    while start.elapsed() < test_duration {
         thread::sleep(STATS_INTERVAL);
         let now = Instant::now();
         let elapsed = now.duration_since(last_time).as_secs_f64();
@@ -271,12 +271,56 @@ fn run_scenario(cache_type: CacheType, reader_threads: usize) {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut readers: Option<Vec<usize>> = None;
+    let mut duration_secs: Option<u64> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--readers" | "-r" => {
+                i += 1;
+                if i < args.len() {
+                    readers = Some(
+                        args[i]
+                            .split(',')
+                            .filter_map(|s| s.trim().parse::<usize>().ok())
+                            .collect(),
+                    );
+                }
+            }
+            "--duration" | "-d" => {
+                i += 1;
+                if i < args.len() {
+                    duration_secs = args[i].trim().parse::<u64>().ok();
+                }
+            }
+            "--help" | "-h" => {
+                println!("Usage: stress_test [OPTIONS]");
+                println!();
+                println!("Options:");
+                println!("  -r, --readers <N[,N,...]>  Reader thread counts (default: 1,4,8)");
+                println!("  -d, --duration <SECS>      Test duration in seconds (default: 30)");
+                println!("  -h, --help                 Show this help");
+                return;
+            }
+            _ => {
+                eprintln!("Unknown argument: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let reader_configs = readers.unwrap_or_else(|| READER_THREAD_CONFIGS.to_vec());
+    let test_duration = Duration::from_secs(duration_secs.unwrap_or(TEST_DURATION.as_secs()));
+
     println!("CacheMap Stress Test (Mixed Read/Write)");
     println!("========================================");
 
-    for &threads in READER_THREAD_CONFIGS {
-        run_scenario(CacheType::PapayaCache, threads);
-        run_scenario(CacheType::DashCache, threads);
+    for &threads in &reader_configs {
+        run_scenario(CacheType::PapayaCache, threads, test_duration);
+        run_scenario(CacheType::DashCache, threads, test_duration);
     }
 
     println!("\nAll scenarios complete.");
