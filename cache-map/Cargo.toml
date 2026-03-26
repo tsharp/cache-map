@@ -8,6 +8,7 @@ dashmap.workspace = true
 papaya.workspace = true
 rayon.workspace = true
 rand.workspace = true
+mimalloc.workspace = true
 
 [[bin]]
 name = "stress_test"

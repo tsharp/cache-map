@@ -16,3 +16,4 @@ tokio = { version = "1.50.0", features = ["full"] }
 rayon = "1.11.0"
 rand = { version = "0.10.0" }
 criterion = { version = "0.8.2", features = ["html_reports"] }
+mimalloc = { version = "0.1.48", features = ["v3"] }

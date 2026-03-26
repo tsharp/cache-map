@@ -4,11 +4,15 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use mimalloc::MiMalloc;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 use cache_map::{CacheConfiguration, CacheMap};
 use cache_map::DashCache;
 use cache_map::PapayaCache;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 const TEST_DURATION: Duration = Duration::from_secs(30);
 const MAX_ELEMENTS: u64 = 250_000;
